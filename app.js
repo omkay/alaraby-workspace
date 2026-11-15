@@ -34,7 +34,7 @@
   const S = {
     members: [], me: null, session: null, loaded: false,
     settings: { deposit: 40000, currency: "$", contingency: 0.1 },
-    stages: [], items: [], payments: [], tasks: [], posts: [],
+    stages: [], items: [], payments: [], tasks: [], posts: [], comments: [], confirmCommentDel: null,
     loginPick: null, loginErr: "", loggingIn: false,
     // tasks
     sel: null, filter: "open", openTask: null, confirmDel: null, editStage: false,
@@ -121,12 +121,13 @@
   }
 
   // ---------------------------------------------------------------- data
-  const TABLES = { settings: "key", stages: "sort", cost_items: "id", payments: "created_at", tasks: "sort", posts: "created_at" };
+  const TABLES = { settings: "key", stages: "sort", cost_items: "id", payments: "created_at", tasks: "sort", posts: "created_at", task_comments: "created_at" };
   async function loadTable(name) {
     const { data, error } = await sb.from(name).select("*").order(TABLES[name], { ascending: name !== "posts" && name !== "payments" });
     if (error) throw error;
     if (name === "settings") data.forEach((r) => { S.settings[r.key] = r.value; });
     else if (name === "cost_items") S.items = data;
+    else if (name === "task_comments") S.comments = data;
     else S[name] = data;
   }
   async function loadAll() { await Promise.all(Object.keys(TABLES).map(loadTable)); S.loaded = true; }
@@ -349,17 +350,20 @@
   function taskRow(t) {
     const st = statusOf(t), open = S.openTask === t.id, pm = paidMap();
     const meta = [];
-    if (t.owner) meta.push('<span class="who-s">' + ini(t.owner, true) + esc(nameOf(t.owner)) + "</span>");
     if (t.due_date) meta.push('<span class="num' + (isOverdue(t) ? " overdue" : "") + '">' + (isOverdue(t) ? "متأخرة · " : "متوقع ") + esc(fd(t.due_date)) + "</span>");
     const it = t.cost_item_id ? S.items.find((i) => i.id === t.cost_item_id) : null;
     if (it) { const c = itemCalc(it, pm); meta.push('<span class="num money">' + (c.est == null ? '<span class="need">بلا تقدير</span>' : "التقدير " + money(c.est)) + " · مدفوع " + money(c.paid) + "</span>"); }
     else if (t.expected_cost) meta.push('<span class="num money">متوقع ' + money(t.expected_cost) + "</span>");
+    const nComments = S.comments.filter((c) => c.task_id === t.id).length;
+    if (nComments) meta.push('<span class="num">' + nComments + (nComments === 1 ? " تعليق" : " تعليقات") + "</span>");
     if (t.notes) meta.push("<span>" + esc(t.notes.length > 80 ? t.notes.slice(0, 80) + "…" : t.notes) + "</span>");
+    const assign = '<select class="assign' + (t.owner ? " has" : "") + '" data-assign="' + t.id + '" aria-label="المسؤول عن: ' + esc(t.title) + '">' +
+      '<option value="">+ إسناد</option>' + S.members.map((m) => '<option value="' + esc(m.id) + '"' + (m.id === t.owner ? " selected" : "") + ">" + esc(m.name) + "</option>").join("") + "</select>";
     let row = '<li class="task s-' + st + (open ? " is-open" : "") + '">' +
       '<button type="button" class="check" data-act="toggle" data-id="' + t.id + '" role="checkbox" aria-checked="' + (st === "done") + '" aria-label="' + esc(t.title) + '">' + CHECK + "</button>" +
       '<button type="button" class="t-main" data-act="open-task" data-id="' + t.id + '" aria-expanded="' + open + '"><span class="t-title">' + esc(t.title) + "</span>" +
       (meta.length ? '<span class="meta">' + meta.join("") + "</span>" : "") + "</button>" +
-      (st === "doing" || st === "blocked" ? '<span class="chip c-' + st + '">' + statusLabel(st) + "</span>" : "<span></span>") + "</li>";
+      '<span class="side">' + (st === "doing" || st === "blocked" ? '<span class="chip c-' + st + '">' + statusLabel(st) + "</span>" : "") + assign + "</span></li>";
     if (open) row += taskEditor(t, it, pm);
     return row;
   }
@@ -386,9 +390,24 @@
       '<label class="field">بند التكلفة المرتبط<select data-k="' + k + 'item" id="eItem">' + itemOptions(t.cost_item_id || null) + "</select></label>" +
       '<label class="field">تكلفة متوقعة (إن لم ترتبط ببند)<input data-k="' + k + 'cost" id="eCost" type="number" min="0" step="1" inputmode="numeric" value="' + esc(t.expected_cost == null ? "" : t.expected_cost) + '"></label>' +
       '<label class="field wide">ملاحظات<textarea data-k="' + k + 'notes" id="eNotes" maxlength="2000">' + esc(t.notes || "") + "</textarea></label>" +
-      "</div>" + linked +
+      "</div>" + linked + commentsBlock(t) +
       '<div class="ed-actions">' + stampTxt + '<span class="grp">' + del +
       '<button type="button" class="btn-ghost" data-act="task-close">إغلاق</button><button type="button" class="btn" data-act="task-save" data-id="' + t.id + '">حفظ</button></span></div></li>';
+  }
+
+  function commentsBlock(t) {
+    const list = S.comments.filter((c) => c.task_id === t.id);
+    const k = "comment:" + t.id + ":";
+    return '<div class="comments"><div class="comments-head">التعليقات والتحديثات <span class="num muted">(' + list.length + ")</span></div>" +
+      (list.length ? '<ul class="clist">' + list.map((c) => {
+        const del = c.author !== S.me.id ? "" : S.confirmCommentDel === c.id
+          ? '<span class="grp"><button type="button" class="btn-danger" data-act="comment-del-yes" data-id="' + c.id + '">حذف</button><button type="button" class="btn-ghost" data-act="comment-del-no">لا</button></span>'
+          : '<button type="button" class="btn-text-danger" data-act="comment-del" data-id="' + c.id + '">حذف</button>';
+        return '<li class="c-item">' + (ini(c.author, true) || '<span class="ini sm">؟</span>') + '<div class="c-body"><div class="post-head"><b>' + esc(nameOf(c.author) || "عضو سابق") +
+          '</b><span class="muted">' + esc(ago(c.created_at)) + '</span><span class="post-actions">' + del + '</span></div><p class="post-body">' + esc(c.body) + "</p></div></li>";
+      }).join("") + "</ul>" : '<p class="muted" style="margin:4px 0;font-size:13px">لا توجد تعليقات بعد. اكتب أول تحديث عن هذه المهمة.</p>') +
+      '<div class="c-compose"><textarea data-k="' + k + 'body" id="cBody" maxlength="2000" rows="2" placeholder="اكتب تعليقاً أو تحديثاً عن هذه المهمة…" aria-label="تعليق جديد"></textarea>' +
+      '<button type="button" class="btn" data-act="comment-add" data-id="' + t.id + '">إرسال</button></div></div>';
   }
 
   // ---------------------------------------------------------------- view: costs
@@ -577,8 +596,10 @@
       sortedStages().flatMap((s) => tasksOf(s.id).map((t) => [s.name, t.title, statusLabel(statusOf(t)), nameOf(t.owner), t.due_date || "", (S.items.find((i) => i.id === t.cost_item_id) || {}).name || "", t.expected_cost, t.notes || ""])));
     const posts = [["التاريخ", "الكاتب", "النوع", "المرحلة", "النص"]].concat(
       S.posts.map((p) => [p.created_at.slice(0, 16).replace("T", " "), nameOf(p.author), (KINDS.find((k) => k.key === p.kind) || {}).label || "", stageName(p.stage_id), p.body]));
+    const comments = [["التاريخ", "المهمة", "الكاتب", "التعليق"]].concat(
+      S.comments.map((c) => [c.created_at.slice(0, 16).replace("T", " "), (S.tasks.find((t) => t.id === c.task_id) || {}).title || "", nameOf(c.author), c.body]));
     const wb = XLSX.utils.book_new();
-    [["الملخص", summary], ["البنود", items], ["الدفعات", pays], ["المراحل", stages], ["المهام", tasks], ["التحديثات", posts]].forEach(([n, rows]) => {
+    [["الملخص", summary], ["البنود", items], ["الدفعات", pays], ["المراحل", stages], ["المهام", tasks], ["تعليقات المهام", comments], ["التحديثات", posts]].forEach(([n, rows]) => {
       const ws = XLSX.utils.aoa_to_sheet(rows);
       ws["!cols"] = rows[0].map((_, i) => ({ wch: Math.min(40, Math.max(10, ...rows.map((r) => String(r[i] == null ? "" : r[i]).length + 2))) }));
       XLSX.utils.book_append_sheet(wb, ws, n);
@@ -627,6 +648,15 @@
         if (ok) { dropPrefix = "task:" + t.id + ":"; S.openTask = null; render(); }
         return;
       }
+      case "comment-add": {
+        const body = val("cBody"); if (!body) { toast("اكتب نص التعليق."); return; }
+        const ok = await run("task_comments", sb.from("task_comments").insert({ task_id: nid, body, author: S.me.id }));
+        if (ok) { dropPrefix = "comment:" + nid + ":"; render(); }
+        return;
+      }
+      case "comment-del": S.confirmCommentDel = nid; render(); return;
+      case "comment-del-no": S.confirmCommentDel = null; render(); return;
+      case "comment-del-yes": S.confirmCommentDel = null; await run("task_comments", sb.from("task_comments").delete().eq("id", nid), "حُذف التعليق."); return;
       case "task-del": S.confirmDel = nid; render(); return;
       case "task-del-no": S.confirmDel = null; render(); return;
       case "task-del-yes": S.confirmDel = null; S.openTask = null; await run("tasks", sb.from("tasks").delete().eq("id", nid), "حُذفت المهمة."); return;
@@ -713,6 +743,12 @@
   });
   document.addEventListener("change", (ev) => {
     if (ev.target.id === "costStage") { S.stageFilter = ev.target.value; S.openItem = null; S.addingItem = false; render(); }
+    if (ev.target.dataset && ev.target.dataset.assign) {
+      const tid = Number(ev.target.dataset.assign), owner = ev.target.value || null, t = S.tasks.find((x) => x.id === tid);
+      if (!t) return;
+      t.owner = owner; render(); // optimistic
+      run("tasks", sb.from("tasks").update(Object.assign({ owner }, stamp())).eq("id", tid), owner ? "أُسندت المهمة إلى " + nameOf(owner) + "." : "أُزيل المسؤول عن المهمة.");
+    }
   });
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape" && (S.openTask || S.openItem || S.addingItem)) { S.openTask = null; S.openItem = null; S.addingItem = false; render(); }
