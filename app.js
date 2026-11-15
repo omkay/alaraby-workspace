@@ -184,7 +184,7 @@
   }
 
   // ---------------------------------------------------------------- routing
-  const route = () => { const h = (location.hash || "").replace("#", ""); return ["tasks", "costs", "updates"].includes(h) ? h : "tasks"; };
+  const route = () => { const h = (location.hash || "").replace("#", ""); return ["summary", "tasks", "costs", "updates"].includes(h) ? h : "summary"; };
   window.addEventListener("hashchange", () => { window.scrollTo(0, 0); render(); });
 
   // ---------------------------------------------------------------- render: login
@@ -209,11 +209,12 @@
     const r = route();
     let view;
     if (!S.loaded) view = '<div class="boot">جارٍ تحميل بيانات الفريق…</div>';
-    else view = r === "costs" ? viewCosts() : r === "updates" ? viewUpdates() : viewTasks();
+    else view = r === "costs" ? viewCosts() : r === "updates" ? viewUpdates() : r === "tasks" ? viewTasks() : viewSummary();
     app.innerHTML =
       '<header class="topbar"><div class="wrap gutter topbar-in">' +
       '<div class="logo">العربي<small>مساحة عمل الافتتاح · درعا</small></div>' +
       '<nav class="tabs-main" aria-label="الأقسام">' +
+      '<a href="#summary"' + (r === "summary" ? ' aria-current="page"' : "") + ">الملخص</a>" +
       '<a href="#tasks"' + (r === "tasks" ? ' aria-current="page"' : "") + ">المهام</a>" +
       '<a href="#costs"' + (r === "costs" ? ' aria-current="page"' : "") + ">التكاليف</a>" +
       '<a href="#updates"' + (r === "updates" ? ' aria-current="page"' : "") + ">التحديثات</a></nav>" +
@@ -221,6 +222,134 @@
       "</div></header>" +
       '<main class="page wrap gutter">' + view + "</main>";
     restoreForm(st);
+  }
+
+  // ---------------------------------------------------------------- view: summary
+  function ring(pct, label) {
+    const r = 46, c = 2 * Math.PI * r, off = c * (1 - pct / 100);
+    return '<svg class="ring" viewBox="0 0 110 110" role="img" aria-label="' + esc(label) + '">' +
+      '<circle cx="55" cy="55" r="' + r + '" fill="none" stroke="var(--todo-soft)" stroke-width="10"/>' +
+      '<circle cx="55" cy="55" r="' + r + '" fill="none" stroke="var(--done)" stroke-width="10" stroke-linecap="round" stroke-dasharray="' + c.toFixed(1) + '" stroke-dashoffset="' + off.toFixed(1) + '" transform="rotate(-90 55 55)"/>' +
+      '<text x="55" y="62" text-anchor="middle" class="ring-num">' + pct + "%</text></svg>";
+  }
+
+  function viewSummary() {
+    const stages = sortedStages(), today = todayUTC();
+    const total = S.tasks.length, done = S.tasks.filter((t) => statusOf(t) === "done").length;
+    const doing = S.tasks.filter((t) => statusOf(t) === "doing").length, blocked = S.tasks.filter((t) => statusOf(t) === "blocked").length;
+    const overdueList = S.tasks.filter(isOverdue);
+    const pct = total ? Math.round(done / total * 100) : 0;
+    const L = launchDate(), left = L ? dayDiff(L, today) : null;
+    const starts = stages.map((s) => toDate(s.start_date)).filter(Boolean);
+    const planStart = starts.length ? new Date(Math.min.apply(null, starts)) : today;
+    const span = L ? Math.max(1, dayDiff(L, planStart)) : 1;
+    const elapsed = Math.min(100, Math.max(0, Math.round(dayDiff(today, planStart) / span * 100)));
+    const T = totals();
+
+    // --- hero cards
+    const countdown = '<div class="card hero">' +
+      '<span class="eyebrow">العد التنازلي للافتتاح</span>' +
+      (L ? '<div class="big num">' + Math.max(left, 0) + '<small>يوماً</small></div><div class="sub num">الافتتاح ' + esc(fmtDY.format(L)) + "</div>" +
+        '<div class="timebar" aria-label="مضى ' + elapsed + '% من وقت الخطة"><i style="width:' + elapsed + '%"></i></div>' +
+        '<div class="sub num">مضى ' + elapsed + "% من وقت الخطة · " + pct + "% من المهام منجزة</div>"
+        : '<div class="sub">حدّد تواريخ المراحل لحساب موعد الافتتاح.</div>') + "</div>";
+
+    const progress = '<div class="card prog">' + ring(pct, "نسبة إنجاز المهام " + pct + "%") +
+      '<div class="prog-txt"><span class="eyebrow">تقدّم المهام</span><b class="num">' + done + " من " + total + " مهمة</b>" +
+      '<div class="pills">' +
+      '<span class="chip c-doing">قيد التنفيذ <span class="num">' + doing + "</span></span>" +
+      '<span class="chip c-blocked">متوقفة <span class="num">' + blocked + "</span></span>" +
+      '<span class="chip c-late">متأخرة <span class="num">' + overdueList.length + "</span></span></div></div></div>";
+
+    const dep = Math.max(T.deposit, 1);
+    const wPaid = Math.min(100, T.paid / dep * 100);
+    const wNeed = Math.min(100 - wPaid, T.required / dep * 100);
+    const over = T.surplus < 0;
+    const moneyCard = '<div class="card money">' +
+      '<span class="eyebrow">الأمانة <bdi>' + money(T.deposit) + "</bdi></span>" +
+      '<div class="stack" role="img" aria-label="مدفوع ' + Math.round(wPaid) + '% من الأمانة">' +
+      '<i class="seg paid" style="width:' + wPaid + '%" title="مدفوع"></i><i class="seg need' + (over ? " over" : "") + '" style="width:' + wNeed + '%" title="مطلوب حتى الافتتاح"></i></div>' +
+      '<ul class="legend">' +
+      '<li><i class="sw paid"></i>مدفوع <b class="num">' + money(T.paid) + "</b></li>" +
+      '<li><i class="sw need"></i>مطلوب حتى الافتتاح <b class="num">' + money(Math.round(T.required)) + "</b></li>" +
+      '<li><i class="sw free"></i>' + (over ? "عجز متوقع" : "فائض متوقع") + ' <b class="num' + (over ? " bad" : "") + '">' + money(Math.abs(Math.round(T.surplus))) + "</b></li></ul>" +
+      (T.missing ? '<a class="note-link" href="#costs">' + T.missing + " بنداً بلا سعر بعد. المبلغ المطلوب سيزيد عند إدخالها ←</a>" : "") + "</div>";
+
+    // --- timeline (gantt). Time runs right-to-left with the page direction.
+    let gantt = "";
+    if (L && stages.length) {
+      const pos = (d) => Math.min(100, Math.max(0, dayDiff(d, planStart) / span * 100));
+      const ticks = [];
+      for (let d = new Date(planStart); dayDiff(L, d) >= 5; d = new Date(d.getTime() + 7 * 86400000)) ticks.push(d); // keep clear of the opening label
+      const todayPos = pos(today), showToday = dayDiff(today, planStart) >= 0 && dayDiff(L, today) >= 0;
+      const rows = stages.map((s, i) => {
+        const a = toDate(s.start_date), b = toDate(s.end_date);
+        const ts = tasksOf(s.id), dn = ts.filter((t) => statusOf(t) === "done").length, st = stageStatus(s);
+        const p = ts.length ? Math.round(dn / ts.length * 100) : 0;
+        const bar = a && b ? '<button type="button" class="gbar g-' + st.key + '" data-act="sel-go" data-id="' + esc(s.id) + '" style="inset-inline-start:' + pos(a) + "%;width:" + Math.max(1.5, pos(new Date(b.getTime() + 86400000)) - pos(a)) + '%" title="' +
+          esc(s.name + " · " + fd(s.start_date) + " – " + fd(s.end_date) + " · " + dn + "/" + ts.length + " مهام · " + st.label) + '"><i style="width:' + p + '%"></i></button>' : "";
+        return '<div class="grow"><div class="glabel"><span class="gnum num">' + (i + 1) + '</span><span class="gname">' + esc(s.name) + '</span><span class="gcount num">' + dn + "/" + ts.length + "</span></div>" +
+          '<div class="gtrack">' + bar + "</div></div>";
+      }).join("");
+      gantt = '<section class="card gantt"><div class="card-head"><h2>الجدول الزمني</h2>' +
+        '<ul class="legend inline"><li><i class="sw g-done"></i>منجزة</li><li><i class="sw g-doing"></i>قيد التنفيذ</li><li><i class="sw g-late"></i>متأخرة</li><li><i class="sw g-todo"></i>لم تبدأ</li></ul></div>' +
+        '<div class="gwrap"><div class="gscale"><div class="glabel"></div><div class="gtrack">' +
+        ticks.map((d) => '<span class="tick num" style="inset-inline-start:' + pos(d) + '%" title="' + esc(fmtD.format(d)) + '">' + d.getUTCDate() + "/" + (d.getUTCMonth() + 1) + "</span>").join("") +
+        '<span class="tick end num" style="inset-inline-start:100%">الافتتاح</span></div></div>' +
+        '<div class="grows">' + rows +
+        '<div class="gover"><div class="glabel"></div><div class="gtrack">' +
+        ticks.map((d) => '<span class="gline" style="inset-inline-start:' + pos(d) + '%"></span>').join("") +
+        (showToday ? '<span class="today" style="inset-inline-start:' + todayPos + '%"><b>اليوم</b></span>' : "") +
+        '<span class="flag" style="inset-inline-start:100%"></span></div></div>' +
+        "</div></div><p class=\"muted gnote\">الشريط الملوّن داخل كل مرحلة يُظهر نسبة المهام المنجزة. اضغط على مرحلة لفتح مهامها.</p></section>";
+    }
+
+    // --- attention
+    const soon = S.tasks.filter((t) => statusOf(t) !== "done" && toDate(t.due_date) && dayDiff(toDate(t.due_date), today) >= 0 && dayDiff(toDate(t.due_date), today) <= 7)
+      .sort((a, b) => (a.due_date || "").localeCompare(b.due_date || ""));
+    const blockedList = S.tasks.filter((t) => statusOf(t) === "blocked");
+    const lateStages = stages.filter((s) => stageStatus(s).key === "late");
+    const attn = [];
+    overdueList.forEach((t) => attn.push({ cls: "c-late", tag: "متأخرة", t, extra: "كان متوقعاً " + fd(t.due_date) }));
+    blockedList.forEach((t) => attn.push({ cls: "c-blocked", tag: "متوقفة", t }));
+    soon.forEach((t) => attn.push({ cls: "c-doing", tag: dayDiff(toDate(t.due_date), today) === 0 ? "اليوم" : "خلال أسبوع", t, extra: fd(t.due_date) }));
+    const attnHtml = '<section class="card"><div class="card-head"><h2>يحتاج انتباه</h2></div>' +
+      (lateStages.length ? '<p class="warnline">' + lateStages.map((s) => "«" + esc(s.name) + "»").join("، ") + " تجاوزت موعد نهايتها ولم تكتمل.</p>" : "") +
+      (attn.length ? '<ul class="alist">' + attn.slice(0, 8).map((a) =>
+        '<li><button type="button" class="aitem" data-act="goto-task" data-id="' + a.t.id + '"><span class="chip ' + a.cls + '">' + a.tag + '</span><span class="atitle">' + esc(a.t.title) + "</span>" +
+        '<span class="muted ameta">' + (a.t.owner ? esc(nameOf(a.t.owner)) : '<span class="need">بلا مسؤول</span>') + (a.extra ? " · " + esc(a.extra) : "") + "</span></button></li>").join("") + "</ul>"
+        : '<div class="empty" style="padding:18px"><b>لا شيء عاجل</b><span>لا مهام متأخرة أو متوقفة أو مستحقة هذا الأسبوع.</span></div>') +
+      (T.missing ? '<a class="note-link" href="#costs">' + T.missing + " بنداً تحتاج تقدير سعر ←</a>" : "") + "</section>";
+
+    // --- team load
+    const unassigned = S.tasks.filter((t) => !t.owner && statusOf(t) !== "done").length;
+    const teamHtml = '<section class="card"><div class="card-head"><h2>الفريق</h2></div><ul class="team">' +
+      S.members.map((m) => {
+        const mine = S.tasks.filter((t) => t.owner === m.id), md = mine.filter((t) => statusOf(t) === "done").length, mo = mine.length - md;
+        const late = mine.filter(isOverdue).length;
+        return '<li><span class="ini">' + esc(initial(m.name)) + '</span><div class="tm"><div class="tm-row"><b>' + esc(m.name) + (m.id === S.me.id ? ' <span class="muted" style="font-weight:600">(أنت)</span>' : "") + "</b>" +
+          '<span class="muted num">' + mo + " مفتوحة · " + md + " منجزة" + (late ? ' · <span class="need">' + late + " متأخرة</span>" : "") + "</span></div>" +
+          '<div class="mini wide"><i style="width:' + (mine.length ? Math.round(md / mine.length * 100) : 0) + '%"></i></div></div></li>';
+      }).join("") + "</ul>" +
+      (unassigned ? '<a class="note-link" href="#tasks">' + unassigned + " مهمة مفتوحة بلا مسؤول ←</a>" : "") + "</section>";
+
+    // --- recent activity (comments, posts, payments, completed tasks)
+    const act = [];
+    S.comments.forEach((c) => { const t = S.tasks.find((x) => x.id === c.task_id); act.push({ at: c.created_at, who: c.author, html: "علّق على «" + esc(t ? t.title : "مهمة") + "»: " + esc(c.body.length > 70 ? c.body.slice(0, 70) + "…" : c.body), task: c.task_id }); });
+    S.posts.forEach((p) => act.push({ at: p.created_at, who: p.author, html: "نشر " + esc((KINDS.find((k) => k.key === p.kind) || KINDS[0]).label) + ": " + esc(p.body.length > 70 ? p.body.slice(0, 70) + "…" : p.body), href: "#updates" }));
+    S.payments.filter((p) => p.created_by).forEach((p) => { const it = S.items.find((i) => i.id === p.item_id); act.push({ at: p.created_at, who: p.created_by, html: "سجّل دفعة " + money(p.amount) + (it ? " لـ «" + esc(it.name) + "»" : ""), href: "#costs" }); });
+    S.tasks.filter((t) => statusOf(t) === "done" && t.updated_by).forEach((t) => act.push({ at: t.updated_at, who: t.updated_by, html: "أنجز «" + esc(t.title) + "»", task: t.id }));
+    act.sort((a, b) => (b.at || "").localeCompare(a.at || ""));
+    const actHtml = '<section class="card"><div class="card-head"><h2>آخر النشاط</h2><a class="linkbtn" href="#updates">كل التحديثات ←</a></div>' +
+      (act.length ? '<ul class="feed-mini">' + act.slice(0, 8).map((a) =>
+        "<li>" + (ini(a.who, true) || '<span class="ini sm">؟</span>') + '<div><span class="fm-who">' + esc(nameOf(a.who) || "عضو") + "</span> " + a.html +
+        '<div class="muted fm-at">' + esc(ago(a.at)) + "</div></div></li>").join("") + "</ul>"
+        : '<div class="empty" style="padding:18px"><b>لا نشاط بعد</b><span>ستظهر هنا التعليقات والدفعات والمهام المنجزة.</span></div>') + "</section>";
+
+    return '<section class="ph-row" style="justify-content:space-between;align-items:flex-end"><div><h1>ملخص الافتتاح</h1><p class="muted" style="margin:2px 0 0">بوظة العربي · درعا</p></div>' +
+      '<span class="muted num" style="font-size:13px">اليوم ' + esc(fmtDY.format(today)) + "</span></section>" +
+      '<div class="hero-grid">' + countdown + progress + moneyCard + "</div>" + gantt +
+      '<div class="two-col">' + attnHtml + teamHtml + "</div>" + actHtml;
   }
 
   // ---------------------------------------------------------------- view: tasks
@@ -625,6 +754,12 @@
       case "logout": await sb.auth.signOut(); return;
       // tasks
       case "sel": selectStage(id); return;
+      case "sel-go": S.sel = id; S.openTask = null; S.editStage = false; store.set("sel", id); location.hash = "#tasks"; return;
+      case "goto-task": {
+        const t = S.tasks.find((x) => x.id === nid); if (!t) return;
+        S.sel = t.stage_id; S.openTask = t.id; S.filter = "all"; S.editStage = false; store.set("sel", t.stage_id);
+        location.hash = "#tasks"; return;
+      }
       case "filter": S.filter = id; store.set("filter", id); render(); return;
       case "toggle": {
         const t = S.tasks.find((x) => x.id === nid); if (!t) return;
