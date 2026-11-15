@@ -240,18 +240,20 @@
     const overdueList = S.tasks.filter(isOverdue);
     const pct = total ? Math.round(done / total * 100) : 0;
     const L = launchDate(), left = L ? dayDiff(L, today) : null;
-    const starts = stages.map((s) => toDate(s.start_date)).filter(Boolean);
-    const planStart = starts.length ? new Date(Math.min.apply(null, starts)) : today;
+    // The timeline window starts at the earliest stage still open (or today), so finished
+    // stages from months ago don't squeeze the remaining weeks into a corner.
+    const openStarts = stages.filter((s) => stageStatus(s).key !== "done").map((s) => toDate(s.start_date)).filter(Boolean);
+    const planStart = new Date(Math.min.apply(null, openStarts.concat([today])));
     const span = L ? Math.max(1, dayDiff(L, planStart)) : 1;
-    const elapsed = Math.min(100, Math.max(0, Math.round(dayDiff(today, planStart) / span * 100)));
+    const stagesDone = stages.filter((s) => stageStatus(s).key === "done").length;
     const T = totals();
 
     // --- hero cards
     const countdown = '<div class="card hero">' +
       '<span class="eyebrow">العد التنازلي للافتتاح</span>' +
       (L ? '<div class="big num">' + Math.max(left, 0) + '<small>يوماً</small></div><div class="sub num">الافتتاح ' + esc(fmtDY.format(L)) + "</div>" +
-        '<div class="timebar" aria-label="مضى ' + elapsed + '% من وقت الخطة"><i style="width:' + elapsed + '%"></i></div>' +
-        '<div class="sub num">مضى ' + elapsed + "% من وقت الخطة · " + pct + "% من المهام منجزة</div>"
+        '<div class="timebar" aria-label="' + stagesDone + " من " + stages.length + ' مراحل مكتملة"><i style="width:' + (stages.length ? Math.round(stagesDone / stages.length * 100) : 0) + '%"></i></div>' +
+        '<div class="sub num">' + stagesDone + " من " + stages.length + " مراحل مكتملة · " + pct + "% من المهام منجزة</div>"
         : '<div class="sub">حدّد تواريخ المراحل لحساب موعد الافتتاح.</div>') + "</div>";
 
     const progress = '<div class="card prog">' + ring(pct, "نسبة إنجاز المهام " + pct + "%") +
@@ -286,7 +288,10 @@
         const a = toDate(s.start_date), b = toDate(s.end_date);
         const ts = tasksOf(s.id), dn = ts.filter((t) => statusOf(t) === "done").length, st = stageStatus(s);
         const p = ts.length ? Math.round(dn / ts.length * 100) : 0;
-        const bar = a && b ? '<button type="button" class="gbar g-' + st.key + '" data-act="sel-go" data-id="' + esc(s.id) + '" style="inset-inline-start:' + pos(a) + "%;width:" + Math.max(1.5, pos(new Date(b.getTime() + 86400000)) - pos(a)) + '%" title="' +
+        const before = (b && dayDiff(planStart, b) > 0) || (st.key === "done" && a && dayDiff(planStart, a) > 0);
+        const bar = before
+          ? '<button type="button" class="gpast" data-act="sel-go" data-id="' + esc(s.id) + '" title="' + esc(s.name + " · " + st.label) + '">✓ ' + (st.key === "done" ? "مُنجزة" : "انتهى موعدها") + " · " + esc(fd(s.end_date)) + "</button>"
+          : a && b ? '<button type="button" class="gbar g-' + st.key + '" data-act="sel-go" data-id="' + esc(s.id) + '" style="inset-inline-start:' + pos(a) + "%;width:" + Math.max(1.5, pos(new Date(b.getTime() + 86400000)) - pos(a)) + '%" title="' +
           esc(s.name + " · " + fd(s.start_date) + " – " + fd(s.end_date) + " · " + dn + "/" + ts.length + " مهام · " + st.label) + '"><i style="width:' + p + '%"></i></button>' : "";
         return '<div class="grow"><div class="glabel"><span class="gnum num">' + (i + 1) + '</span><span class="gname">' + esc(s.name) + '</span><span class="gcount num">' + dn + "/" + ts.length + "</span></div>" +
           '<div class="gtrack">' + bar + "</div></div>";

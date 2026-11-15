@@ -290,6 +290,7 @@ table.t tfoot td { font-weight: 700; background: var(--bg-2); }
 .g-todo { background: var(--todo-soft); color: var(--todo); } .g-todo i { background: var(--todo); }
 .sw.g-done { background: var(--done); } .sw.g-doing { background: var(--doing); } .sw.g-late { background: var(--late); } .sw.g-todo { background: var(--todo); }
 .gnote { margin: 0; font-size: 12.5px; }
+.gpast { position: absolute; top: 3px; bottom: 3px; inset-inline-start: 0; z-index: 1; border: none; border-radius: 6px; padding: 0 10px; background: var(--done-soft); color: var(--done); font-size: 12px; font-weight: 700; white-space: nowrap; cursor: pointer; }
 @media (max-width: 620px) { .gscale, .grow, .gover { grid-template-columns: 130px minmax(420px, 1fr); } .gcount { display: none; } }
 
 .two-col { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; }
