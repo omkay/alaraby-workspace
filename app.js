@@ -41,7 +41,9 @@
     // costs
     costTab: "items", stageFilter: "", q: "", openItem: null, addingItem: false, confirmItemDel: null, confirmPayDel: null, editSettings: false,
     // updates
-    kind: "update", feedFilter: "all", confirmPostDel: null
+    kind: "update", feedFilter: "all", confirmPostDel: null,
+    // admin log
+    log: [], logLoaded: false, logWho: "", logType: "all"
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem("alaraby." + k); return v == null ? d : v; } catch (e) { return d; } },
@@ -78,6 +80,11 @@
   const ini = (id, sm) => { const n = nameOf(id); return n ? '<span class="ini' + (sm ? " sm" : "") + '" aria-hidden="true">' + esc(initial(n)) + "</span>" : ""; };
   const stageName = (id) => (S.stages.find((s) => s.id === id) || {}).name || "";
   const statusOf = (t) => t.status || "todo";
+  const isAdmin = () => !!(S.me && S.me.role === "admin");
+  const fmtT = new Intl.DateTimeFormat("ar-SY-u-nu-latn", { hour: "numeric", minute: "2-digit" });
+  const fmtDay = new Intl.DateTimeFormat("ar-SY-u-nu-latn", { weekday: "long", day: "numeric", month: "long" });
+  const localDay = (iso) => { const d = new Date(iso); return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate(); };
+  const memberByEmail = (e) => S.members.find((m) => m.email.toLowerCase() === String(e || "").toLowerCase()) || null;
   const statusLabel = (k) => (STATUS.find((s) => s.key === k) || STATUS[0]).label;
 
   function toast(msg) {
@@ -130,12 +137,24 @@
     else if (name === "task_comments") S.comments = data;
     else S[name] = data;
   }
-  async function loadAll() { await Promise.all(Object.keys(TABLES).map(loadTable)); S.loaded = true; }
+  async function loadAll() { await Promise.all(Object.keys(TABLES).map(loadTable)); S.loaded = true; if (isAdmin()) loadLog(); }
+  async function loadLog() {
+    const { data, error } = await sb.from("activity_log").select("*").order("at", { ascending: false }).limit(600);
+    if (error) { console.error(error); return; }
+    S.log = data || []; S.logLoaded = true;
+  }
+  // a light "opened the app" mark, at most every 30 minutes per person (sign-ins are logged by the server)
+  function markVisit() {
+    const k = "visit." + S.me.id, last = Number(store.get(k, 0));
+    if (Date.now() - last < 30 * 60000) return;
+    store.set(k, String(Date.now()));
+    sb.from("activity_log").insert({ action: "visit", actor_email: S.me.email }).then(() => {});
+  }
   let channel = null;
   function subscribe() {
     if (channel) sb.removeChannel(channel);
     channel = sb.channel("workspace")
-      .on("postgres_changes", { event: "*", schema: "public" }, (p) => { if (TABLES[p.table]) refresh(p.table); })
+      .on("postgres_changes", { event: "*", schema: "public" }, (p) => { if (TABLES[p.table]) refresh(p.table); else if (p.table === "activity_log" && isAdmin()) refresh("activity_log"); })
       .subscribe();
   }
   const pending = new Set(); let refreshTimer = null;
@@ -143,7 +162,7 @@
     pending.add(table); clearTimeout(refreshTimer);
     refreshTimer = setTimeout(async () => {
       const list = [...pending]; pending.clear();
-      try { await Promise.all(list.map(loadTable)); } catch (e) { /* keep showing what we have */ }
+      try { await Promise.all(list.map((t) => (t === "activity_log" ? loadLog() : loadTable(t)))); } catch (e) { /* keep showing what we have */ }
       render();
     }, 200);
   }
@@ -184,7 +203,7 @@
   }
 
   // ---------------------------------------------------------------- routing
-  const route = () => { const h = (location.hash || "").replace("#", ""); return ["summary", "tasks", "costs", "updates"].includes(h) ? h : "summary"; };
+  const route = () => { const h = (location.hash || "").replace("#", ""); return (["summary", "tasks", "costs", "updates"].includes(h) || (h === "log" && isAdmin())) ? h : "summary"; };
   window.addEventListener("hashchange", () => { window.scrollTo(0, 0); render(); });
 
   // ---------------------------------------------------------------- render: login
@@ -209,7 +228,7 @@
     const r = route();
     let view;
     if (!S.loaded) view = '<div class="boot">جارٍ تحميل بيانات الفريق…</div>';
-    else view = r === "costs" ? viewCosts() : r === "updates" ? viewUpdates() : r === "tasks" ? viewTasks() : viewSummary();
+    else view = r === "log" ? viewLog() : r === "costs" ? viewCosts() : r === "updates" ? viewUpdates() : r === "tasks" ? viewTasks() : viewSummary();
     app.innerHTML =
       '<header class="topbar"><div class="wrap gutter topbar-in">' +
       '<div class="logo">العربي<small>مساحة عمل الافتتاح · درعا</small></div>' +
@@ -217,7 +236,8 @@
       '<a href="#summary"' + (r === "summary" ? ' aria-current="page"' : "") + ">الملخص</a>" +
       '<a href="#tasks"' + (r === "tasks" ? ' aria-current="page"' : "") + ">المهام</a>" +
       '<a href="#costs"' + (r === "costs" ? ' aria-current="page"' : "") + ">التكاليف</a>" +
-      '<a href="#updates"' + (r === "updates" ? ' aria-current="page"' : "") + ">التحديثات</a></nav>" +
+      '<a href="#updates"' + (r === "updates" ? ' aria-current="page"' : "") + ">التحديثات</a>" +
+      (isAdmin() ? '<a href="#log"' + (r === "log" ? ' aria-current="page"' : "") + ">السجل</a>" : "") + "</nav>" +
       '<div class="me">' + ini(S.me.id, true) + esc(S.me.name) + ' <button type="button" class="linkbtn" data-act="logout">خروج</button></div>' +
       "</div></header>" +
       '<main class="page wrap gutter">' + view + "</main>";
@@ -713,6 +733,96 @@
       "</section>";
   }
 
+  // ---------------------------------------------------------------- view: activity log (admin only)
+  const LOG_TABLE = { tasks: "مهمة", cost_items: "بند تكلفة", payments: "دفعة", stages: "مرحلة", posts: "منشوراً", task_comments: "تعليقاً", settings: "الإعدادات" };
+  const LOG_FIELD = { title: "العنوان", name: "الاسم", status: "الحالة", owner: "المسؤول", due_date: "التاريخ المتوقع", notes: "الملاحظات",
+    cost_item_id: "بند التكلفة", expected_cost: "التكلفة المتوقعة", stage_id: "المرحلة", done_at: "تاريخ الإنجاز", sort: "الترتيب",
+    estimate: "التقدير", qty: "الكمية", category: "الفئة", supplier: "المورد", description: "الوصف", start_date: "البداية", end_date: "النهاية",
+    amount: "المبلغ", paid_on: "تاريخ الدفع", method: "الطريقة", receipt: "الإيصال", paid_by: "دفع بواسطة", item_id: "البند",
+    body: "النص", kind: "النوع", value: "القيمة", task_id: "المهمة" };
+  const itemName = (id) => (S.items.find((i) => i.id === Number(id)) || {}).name || (id == null ? "" : "بند #" + id);
+  const taskTitle = (id) => (S.tasks.find((t) => t.id === Number(id)) || {}).title || (id == null ? "" : "مهمة #" + id);
+  function logVal(field, v) {
+    if (v == null || v === "") return "—";
+    if (field === "owner" || field === "author") return nameOf(v) || "عضو";
+    if (field === "status") return statusLabel(v);
+    if (field === "stage_id") return stageName(v) || v;
+    if (field === "cost_item_id" || field === "item_id") return itemName(v);
+    if (field === "task_id") return taskTitle(v);
+    if (field === "kind") return (KINDS.find((k) => k.key === v) || {}).label || v;
+    if (/_date$|^paid_on$|^done_at$/.test(field)) return fd(String(v), true);
+    if (field === "amount" || field === "estimate" || field === "expected_cost") return cur() + Number(v).toLocaleString("en-US");
+    const t = typeof v === "string" ? v : JSON.stringify(v);
+    return t.length > 90 ? t.slice(0, 90) + "…" : t;
+  }
+  function device(ua) {
+    ua = ua || "";
+    if (/iPhone/.test(ua)) return "iPhone"; if (/iPad/.test(ua)) return "iPad"; if (/Android/.test(ua)) return "Android";
+    if (/Macintosh|Mac OS/.test(ua)) return "Mac"; if (/Windows/.test(ua)) return "Windows"; return "";
+  }
+  function logLine(e) {
+    const d = e.data || {}, ch = e.changes || {};
+    if (e.action === "login") { const dv = device(d.user_agent); return { verb: "سجّل الدخول" + (dv ? " من " + dv : ""), cls: "lg-in" }; }
+    if (e.action === "visit") return { verb: "فتح التطبيق", cls: "lg-visit" };
+    const verb = e.action === "insert" ? "أضاف" : e.action === "delete" ? "حذف" : "عدّل";
+    let what = LOG_TABLE[e.table_name] || e.table_name, label = e.label || "";
+    if (e.table_name === "payments") {
+      const pay = e.action === "update" ? (S.payments.find((p) => String(p.id) === e.row_id) || {}) : d;
+      label = (pay.amount != null ? cur() + Number(pay.amount).toLocaleString("en-US") : "") + (pay.item_id ? " · " + itemName(pay.item_id) : "");
+    } else if (e.table_name === "task_comments") {
+      const tid = e.action === "update" ? (S.comments.find((c) => String(c.id) === e.row_id) || {}).task_id : d.task_id;
+      what = "تعليقاً على «" + taskTitle(tid) + "»";
+    } else if (e.table_name === "settings") { what = "الإعدادات"; label = ({ deposit: "الأمانة", contingency: "نسبة الاحتياطي", currency: "العملة" })[e.row_id] || label; }
+    let details = [];
+    if (e.action === "update") {
+      details = Object.keys(ch).filter((k) => k !== "sort" || Object.keys(ch).length === 1).map((k) =>
+        '<li><span class="muted">' + esc(LOG_FIELD[k] || k) + ":</span> " + (ch[k][0] == null || ch[k][0] === "" ? '<span class="muted">—</span>' : "<s>" + esc(logVal(k, ch[k][0])) + "</s>") + " ← <b>" + esc(logVal(k, ch[k][1])) + "</b></li>");
+      if (e.table_name === "tasks" && ch.status && ch.status[1] === "done") return { verb: "أنجز مهمة", label, cls: "lg-done", details: details.filter((x) => x.indexOf(">الحالة:") < 0 && x.indexOf(">تاريخ الإنجاز:") < 0) };
+    } else if (e.table_name === "posts" || e.table_name === "task_comments") {
+      if (d.body) details = ['<li class="lg-quote">' + esc(d.body.length > 160 ? d.body.slice(0, 160) + "…" : d.body) + "</li>"];
+      if (e.table_name === "task_comments") label = "";
+    }
+    return { verb: verb + " " + what, label, cls: "lg-" + e.action, details };
+  }
+  function viewLog() {
+    if (!S.logLoaded) return '<div class="boot">جارٍ تحميل السجل…</div>';
+    const now = Date.now(), week = now - 7 * 86400000;
+    const people = S.members.map((m) => {
+      const mine = S.log.filter((e) => (e.actor_email || "").toLowerCase() === m.email.toLowerCase());
+      const login = mine.find((e) => e.action === "login");
+      const seen = mine[0];
+      const edits = mine.filter((e) => e.action !== "login" && e.action !== "visit" && new Date(e.at).getTime() > week).length;
+      return { m, login, seen, edits };
+    });
+    const cards = '<section class="who-grid">' + people.map((p) =>
+      '<button type="button" class="who-card" data-act="log-who" data-id="' + esc(p.m.email) + '" aria-pressed="' + (S.logWho === p.m.email) + '">' +
+      '<span class="ini">' + esc(initial(p.m.name)) + '</span><div class="wc-body"><b>' + esc(p.m.name) + (p.m.role === "admin" ? ' <span class="chip c-accent">مسؤول</span>' : "") + "</b>" +
+      '<span class="muted">آخر ظهور: ' + (p.seen ? esc(ago(p.seen.at)) : "لم يدخل بعد") + "</span>" +
+      '<span class="muted">آخر دخول: ' + (p.login ? esc(ago(p.login.at)) : "—") + "</span>" +
+      '<span class="muted">تعديلات هذا الأسبوع: <b class="ink">' + p.edits + "</b></span></div></button>").join("") + "</section>";
+    const list = S.log.filter((e) => (!S.logWho || (e.actor_email || "").toLowerCase() === S.logWho.toLowerCase()) &&
+      (S.logType === "all" || (S.logType === "access" ? (e.action === "login" || e.action === "visit") : (e.action !== "login" && e.action !== "visit"))));
+    let lastDay = "", html = "";
+    list.forEach((e) => {
+      const day = localDay(e.at);
+      if (day !== lastDay) { if (html) html += "</ul>"; html += '<h3 class="lg-day">' + esc(fmtDay.format(new Date(e.at))) + '</h3><ul class="lg-list">'; lastDay = day; }
+      const m = memberByEmail(e.actor_email), L = logLine(e);
+      html += '<li class="lg ' + L.cls + '"><span class="ini' + (m ? "" : " ghost") + '" aria-hidden="true">' + esc(m ? initial(m.name) : "؟") + "</span><div>" +
+        '<div class="lg-head"><b>' + esc(m ? m.name : e.actor_email || "النظام") + "</b> " + esc(L.verb) + (L.label ? ' <span class="lg-label">' + esc(L.label) + "</span>" : "") +
+        '<time class="muted" datetime="' + esc(e.at) + '" title="' + esc(new Date(e.at).toLocaleString("ar-SY-u-nu-latn")) + '">' + esc(fmtT.format(new Date(e.at))) + "</time></div>" +
+        (L.details && L.details.length ? '<ul class="lg-details">' + L.details.join("") + "</ul>" : "") + "</div></li>";
+    });
+    if (html) html += "</ul>";
+    const types = [["all", "الكل"], ["changes", "التعديلات"], ["access", "الدخول"]];
+    return '<section><h1>سجل النشاط</h1><p class="muted" style="margin:4px 0 0">من دخل، ومتى، وماذا غيّر. يظهر لك فقط بصفتك مسؤولاً، ولا يمكن لأحد تعديله أو حذفه.</p></section>' +
+      cards +
+      '<section class="panel"><div class="subtabs">' +
+      types.map((t) => '<button type="button" class="subtab" data-act="log-type" data-id="' + t[0] + '" aria-pressed="' + (S.logType === t[0]) + '">' + t[1] + "</button>").join("") +
+      (S.logWho ? '<button type="button" class="linkbtn" data-act="log-who" data-id="">عرض الجميع ✕</button>' : "") + "</div>" +
+      (html ? '<div class="lg-wrap">' + html + "</div>" : '<div class="empty"><b>لا يوجد نشاط مسجّل بعد</b><span>يبدأ التسجيل من الآن: كل دخول وكل تعديل سيظهر هنا.</span></div>') +
+      (S.log.length >= 600 ? '<p class="muted" style="padding:0 20px 16px;font-size:13px">يعرض آخر 600 حدث.</p>' : "") + "</section>";
+  }
+
   // ---------------------------------------------------------------- export to Excel
   function exportXlsx() {
     if (!window.XLSX) { toast("تعذّر تحميل أداة Excel. تحقق من الاتصال."); return; }
@@ -873,6 +983,8 @@
       case "feed": S.feedFilter = id; render(); return;
       case "post-del": S.confirmPostDel = nid; render(); return;
       case "post-del-no": S.confirmPostDel = null; render(); return;
+      case "log-who": S.logWho = S.logWho === id ? "" : id; render(); return;
+      case "log-type": S.logType = id; render(); return;
       case "post-del-yes": S.confirmPostDel = null; await run("posts", sb.from("posts").delete().eq("id", nid), "حُذف المنشور."); return;
     }
   });
@@ -908,7 +1020,7 @@
         S.loginErr = /invalid/i.test(error.message) ? "كلمة المرور غير صحيحة. تأكد منها واطلبها من عمر إن نسيتها." : "تعذّر تسجيل الدخول: " + error.message;
         renderLogin(); return;
       }
-      await onSession(data.session);
+      await onSession(data.session, true);
     } else if (f.id === "addTask") {
       ev.preventDefault();
       const input = $("addInput"), title = input.value.trim();
@@ -927,13 +1039,14 @@
   });
 
   // ---------------------------------------------------------------- session
-  async function onSession(session) {
+  async function onSession(session, freshLogin) {
     S.session = session || null;
     if (!session) { S.me = null; S.loaded = false; render(); return; }
     const email = (session.user.email || "").toLowerCase();
     S.me = S.members.find((m) => m.email.toLowerCase() === email) || null;
     if (!S.me) { S.loginErr = "هذا الحساب غير موجود في قائمة الفريق."; await sb.auth.signOut(); S.session = null; renderLogin(); return; }
     render();
+    if (freshLogin) store.set("visit." + S.me.id, String(Date.now())); else markVisit();
     try { await loadAll(); subscribe(); }
     catch (e) { console.error(e); toast("تعذّر تحميل البيانات. تحقق من الاتصال ثم أعد تحميل الصفحة."); }
     render();
